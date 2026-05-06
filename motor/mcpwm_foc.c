@@ -3538,6 +3538,8 @@ void mcpwm_foc_adc_int_handler(void *p, uint32_t flags) {
 
 		// Apply MTPA. See: https://github.com/vedderb/bldc/pull/179
 		const float ld_lq_diff = conf_now->foc_motor_ld_lq_diff;
+		const float mod_q = motor_now->m_motor_state.mod_q_filter;
+		
 		if (conf_now->foc_mtpa_mode != MTPA_MODE_OFF && ld_lq_diff != 0.0 &&
 				motor_now->m_control_mode != CONTROL_MODE_OPENLOOP_PHASE) {
 			const float lambda = conf_now->foc_motor_flux_linkage;
@@ -3547,17 +3549,18 @@ void mcpwm_foc_adc_int_handler(void *p, uint32_t flags) {
 				iq_ref = utils_min_abs(iq_set_tmp, motor_now->m_motor_state.iq_filter);
 			}
 
-			id_set_tmp = (lambda - sqrtf(SQ(lambda) + 8.0 * SQ(ld_lq_diff * iq_ref))) / (4.0 * ld_lq_diff);
-			iq_set_tmp = SIGN(iq_set_tmp) * sqrtf(SQ(iq_set_tmp) - SQ(id_set_tmp));
+			id_set_tmp = (lambda - sqrtf(SQ(lambda) + 8.0 * SQ(ld_lq_diff * iq_ref))) / (4.0 * ld_lq_diff) - motor_now->m_i_fw_set;
+			float i_diff = SQ(iq_set_tmp) - SQ(id_set_tmp);
+			if (i_diff < 0.0) i_diff = 0;
+			iq_set_tmp = SIGN(iq_set_tmp) * sqrtf(i_diff);
+		} else{
+
+			// Running FW from the 1 khz timer seems fast enough.
+			//		run_fw(motor_now, dt);
+			id_set_tmp -= motor_now->m_i_fw_set;
+			iq_set_tmp -= SIGN(mod_q) * motor_now->m_i_fw_set * conf_now->foc_fw_q_current_factor;
 		}
-
-		const float mod_q = motor_now->m_motor_state.mod_q_filter;
-
-		// Running FW from the 1 khz timer seems fast enough.
-//		run_fw(motor_now, dt);
-		id_set_tmp -= motor_now->m_i_fw_set;
-		iq_set_tmp -= SIGN(mod_q) * motor_now->m_i_fw_set * conf_now->foc_fw_q_current_factor;
-
+		
 		// Apply current limits
 		// TODO: Consider D axis current for the input current as well. Currently this is done using
 		// l_in_current_map_start in update_override_limits.
