@@ -3536,10 +3536,14 @@ void mcpwm_foc_adc_int_handler(void *p, uint32_t flags) {
 					(float*)&motor_now->m_motor_state.phase_cos);
 		}
 
+		// Run field weakening at the ADC rate (backported from v7) so the FW
+		// integrator tracks the duty estimate at the same rate as the current loop.
+		foc_run_fw(motor_now, dt);
+
 		// Apply MTPA. See: https://github.com/vedderb/bldc/pull/179
 		const float ld_lq_diff = conf_now->foc_motor_ld_lq_diff;
 		const float mod_q = motor_now->m_motor_state.mod_q_filter;
-		
+
 		if (conf_now->foc_mtpa_mode != MTPA_MODE_OFF && ld_lq_diff != 0.0 &&
 				motor_now->m_control_mode != CONTROL_MODE_OPENLOOP_PHASE) {
 			const float lambda = conf_now->foc_motor_flux_linkage;
@@ -3554,9 +3558,6 @@ void mcpwm_foc_adc_int_handler(void *p, uint32_t flags) {
 			if (i_diff < 0.0) i_diff = 0;
 			iq_set_tmp = SIGN(iq_set_tmp) * sqrtf(i_diff);
 		} else{
-
-			// Running FW from the 1 khz timer seems fast enough.
-			//		run_fw(motor_now, dt);
 			id_set_tmp -= motor_now->m_i_fw_set;
 			iq_set_tmp -= SIGN(mod_q) * motor_now->m_i_fw_set * conf_now->foc_fw_q_current_factor;
 		}
@@ -3832,7 +3833,7 @@ void mcpwm_foc_adc_int_handler(void *p, uint32_t flags) {
 // Private functions
 
 static void timer_update(motor_all_state_t *motor, float dt) {
-	foc_run_fw(motor, dt);
+	// foc_run_fw moved to ADC ISR (backported from v7) — runs at PWM rate now.
 
 	const mc_configuration *conf_now = motor->m_conf;
 
