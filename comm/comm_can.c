@@ -1273,6 +1273,18 @@ void comm_can_send_status6(uint8_t id, bool replace) {
 			buffer, send_index, replace, 0);
 }
 
+void comm_can_send_status7(uint8_t id, bool replace) {
+    int32_t send_index = 0;
+    uint8_t buffer[8];
+    // Convert id and iq floats to 16-bit integers with a scaler of x100 (e.g. 15.5A becomes 1550)
+    buffer_append_float16(buffer, mc_interface_read_reset_avg_id(), 1e2, &send_index);
+    buffer_append_float16(buffer, mc_interface_read_reset_avg_iq(), 1e2, &send_index);
+    // Append 1-byte fault code
+    buffer[send_index++] = (uint8_t)mc_interface_get_fault();
+
+    comm_can_transmit_eid_replace(id | ((uint32_t)CAN_PACKET_STATUS_7 << 8), buffer, send_index, replace, 0);
+}
+
 #if CAN_ENABLE
 static THD_FUNCTION(cancom_read_thread, arg) {
 	(void)arg;
@@ -1499,6 +1511,15 @@ static void send_can_status(uint8_t msgs, uint8_t id) {
 #ifdef HW_HAS_DUAL_MOTORS
 		mc_interface_select_motor_thread(2);
 		comm_can_send_status6(utils_second_motor_id(), false);
+#endif
+	}
+
+	if ((msgs >> 6) & 1) {
+		mc_interface_select_motor_thread(1);
+		comm_can_send_status7(id, false);
+#ifdef HW_HAS_DUAL_MOTORS
+		mc_interface_select_motor_thread(2);
+		comm_can_send_status7(utils_second_motor_id(), false);
 #endif
 	}
 }
