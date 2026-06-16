@@ -1405,6 +1405,40 @@ float mc_interface_read_reset_avg_iq(void) {
 }
 
 /**
+ * Get the filtered direct axis motor current without resetting any
+ * accumulators. Safe to call from multiple places. (FOC only)
+ *
+ * @return
+ * The D axis current.
+ */
+float mc_interface_get_id(void) {
+	switch (motor_now()->m_conf.motor_type) {
+	case MOTOR_TYPE_FOC:
+		return mcpwm_foc_get_id_filter();
+
+	default:
+		return 0.0;
+	}
+}
+
+/**
+ * Get the filtered quadrature axis motor current without resetting any
+ * accumulators. Safe to call from multiple places. (FOC only)
+ *
+ * @return
+ * The Q axis current.
+ */
+float mc_interface_get_iq(void) {
+	switch (motor_now()->m_conf.motor_type) {
+	case MOTOR_TYPE_FOC:
+		return DIR_MULT * mcpwm_foc_get_iq_filter();
+
+	default:
+		return 0.0;
+	}
+}
+
+/**
  * Read and reset the average direct axis motor voltage. (FOC only)
  *
  * @return
