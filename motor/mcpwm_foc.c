@@ -3553,12 +3553,22 @@ void mcpwm_foc_adc_int_handler(void *p, uint32_t flags) {
 			float i_diff = SQ(iq_set_tmp) - SQ(id_set_tmp);
 			if (i_diff < 0.0) i_diff = 0;
 			iq_set_tmp = SIGN(iq_set_tmp) * sqrtf(i_diff);
-		} else{
-
+		} else {
 			// Running FW from the 1 khz timer seems fast enough.
 			//		run_fw(motor_now, dt);
-			id_set_tmp -= motor_now->m_i_fw_set;
-			iq_set_tmp -= SIGN(mod_q) * motor_now->m_i_fw_set * conf_now->foc_fw_q_current_factor;
+			// id_set_tmp -= motor_now->m_i_fw_set;
+			// iq_set_tmp -= SIGN(mod_q) * motor_now->m_i_fw_set * conf_now->foc_fw_q_current_factor;
+			const float lambda = conf_now->foc_motor_flux_linkage;
+
+			float iq_ref = iq_set_tmp;
+			if (conf_now->foc_mtpa_mode == MTPA_MODE_IQ_MEASURED) {
+				iq_ref = utils_min_abs(iq_set_tmp, motor_now->m_motor_state.iq_filter);
+			}
+			
+			id_set_tmp = (lambda - sqrtf(SQ(lambda) + 8.0 * SQ(ld_lq_diff * iq_ref))) / (4.0 * ld_lq_diff) - motor_now->m_i_fw_set;
+			float i_diff = SQ(iq_set_tmp) - SQ(id_set_tmp);
+			if (i_diff < 0.0) i_diff = 0;
+			iq_set_tmp = SIGN(iq_set_tmp) * sqrtf(i_diff);
 		}
 		
 		// Apply current limits
