@@ -97,5 +97,10 @@ void comm_can_send_status4(uint8_t id, bool replace);
 void comm_can_send_status5(uint8_t id, bool replace);
 void comm_can_send_status6(uint8_t id, bool replace);
 void comm_can_send_status7(uint8_t id, bool replace);
+void comm_can_send_status8(uint8_t id, bool replace);
+void comm_can_send_status9(uint8_t id, bool replace);
+void comm_can_send_status10(uint8_t id, bool replace);
+void comm_can_send_status11(uint8_t id, bool replace);
+void comm_can_send_status12(uint8_t id, bool replace);
 
 #endif /* COMM_CAN_H_ */

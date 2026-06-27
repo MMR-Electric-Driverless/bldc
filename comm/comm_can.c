@@ -28,6 +28,7 @@
 #include "datatypes.h"
 #include "buffer.h"
 #include "mc_interface.h"
+#include "mcpwm_foc.h"
 #include "timeout.h"
 #include "commands.h"
 #include "app.h"
@@ -1285,6 +1286,133 @@ void comm_can_send_status7(uint8_t id, bool replace) {
 	comm_can_transmit_eid_replace(id | ((uint32_t)CAN_PACKET_STATUS_7 << 8), buffer, send_index, replace, 0);
 }
 
+// STATUS_8: FOC current setpoints / MTPA debug.
+// These are the firmware-truth values that fw_replay.py reconstructs offline:
+// the final d/q current targets (post-MTPA, post-FW, post-current-limit) and the
+// field-weakening current magnitude. Plus the active control mode and a flags byte.
+void comm_can_send_status8(uint8_t id, bool replace) {
+	int32_t send_index = 0;
+	uint8_t buffer[8];
+	// id/iq target and i_fw in amps, x100 scaler (e.g. 15.5A -> 1550)
+	buffer_append_float16(buffer, mcpwm_foc_get_id_target(), 1e2, &send_index);
+	buffer_append_float16(buffer, mcpwm_foc_get_iq_target(), 1e2, &send_index);
+	buffer_append_float16(buffer, mcpwm_foc_get_i_fw(), 1e2, &send_index);
+	// 1-byte control mode (mc_control_mode enum: CURRENT, CURRENT_BRAKE, OPENLOOP, ...)
+	buffer[send_index++] = (uint8_t)mc_interface_get_control_mode();
+	// flags: bit0 = phases shorted (control_duty, i.e. not actively driving)
+	uint8_t flags = 0;
+	if (mcpwm_foc_get_control_duty()) {
+		flags |= 1 << 0;
+	}
+	buffer[send_index++] = flags;
+	// When control_duty is true here, the controller deliberately commands 
+	// duty = 0, i.e. it turns the inverter into a passive short (all low-side 
+	// or freewheeling) instead of running the current PI loop. It does this to 
+	// avoid actively braking/reversing through the wrong sign during the transient.
+
+	comm_can_transmit_eid_replace(id | ((uint32_t)CAN_PACKET_STATUS_8 << 8), buffer, send_index, replace, 0);
+}
+
+// STATUS_9: FOC voltages (same vd/vq VESC Tool shows), duty and bus voltage.
+//
+// vd and vq are the OUTPUT of the current PI controller (control_current() in
+// mcpwm_foc.c): the voltages the controller decides to apply, expressed in the
+// rotor (d/q) reference frame, in volts.
+// They already include the decoupling and back-EMF feedforward terms and the
+// voltage saturation against max_v_mag. There is no separate "vd/vq target" --
+// these ARE the commanded voltages (the targets for the modulator).
+//
+// mod_d / mod_q are just vd / vq normalized by the bus voltage. The firmware
+// normally computes them as (mcpwm_foc.c control_current()):
+//       voltage_normalize = 1.5 / v_bus            (= 1 / ((2/3) * v_bus))
+//       mod_d = vd * voltage_normalize
+//       mod_q = vq * voltage_normalize
+// A modulation magnitude of 1.0 corresponds to the maximum voltage the inverter
+// can synthesize (including overmodulation). v_bus is also needed to interpret
+// max_v_mag from STATUS_10. Measured id/iq are already on STATUS_7.
+void comm_can_send_status9(uint8_t id, bool replace) {
+	int32_t send_index = 0;
+	uint8_t buffer[8];
+	buffer_append_float16(buffer, mcpwm_foc_get_vd(), 1e2, &send_index);            // vd, V, x100
+	buffer_append_float16(buffer, mcpwm_foc_get_vq(), 1e2, &send_index);            // vq, V, x100
+	buffer_append_float16(buffer, mc_interface_get_duty_cycle_now(), 1e3, &send_index); // duty, -1..1, x1000
+	// v_bus: used to normalize vd/vq into mod_d/mod_q (= v * 1.5 / v_bus)
+	buffer_append_float16(buffer, mc_interface_get_input_voltage_filtered(), 1e2, &send_index); // v_bus, V, x100
+
+	comm_can_transmit_eid_replace(id | ((uint32_t)CAN_PACKET_STATUS_9 << 8), buffer, send_index, replace, 0);
+}
+
+// STATUS_10: braking / loss-of-control trace.
+// |v|applied is the magnitude of the applied voltage vector, max_v_mag is the
+// largest vector the inverter can synthesize, bemf is the back-EMF estimate
+// (omega_e * flux_linkage). When |v|applied saturates against max_v_mag while
+// bemf approaches it, the current loop can no longer drive current (control lost).
+void comm_can_send_status10(uint8_t id, bool replace) {
+	int32_t send_index = 0;
+	uint8_t buffer[8];
+	float vd = mcpwm_foc_get_vd();
+	float vq = mcpwm_foc_get_vq();
+	float v_mag = sqrtf(vd * vd + vq * vq);
+	buffer_append_float16(buffer, v_mag, 1e2, &send_index);                  // V, x100
+	buffer_append_float16(buffer, mcpwm_foc_get_max_v_mag(), 1e2, &send_index); // V, x100
+	buffer_append_float16(buffer, mcpwm_foc_get_bemf(), 1e2, &send_index);   // V, x100
+	// flags: bit0 = phases shorted (control_duty), bit1 = voltage saturated
+	uint8_t flags = 0;
+	if (mcpwm_foc_get_control_duty()) {
+		flags |= 1 << 0;
+	}
+	if (v_mag >= mcpwm_foc_get_max_v_mag() * 0.98) {
+		flags |= 1 << 1;
+	}
+	buffer[send_index++] = flags;
+	// braking short-all-phases sample counter (0..100)
+	int br = mcpwm_foc_get_br_no_duty_samples();
+	buffer[send_index++] = (uint8_t)(br > 255 ? 255 : br);
+
+	comm_can_transmit_eid_replace(id | ((uint32_t)CAN_PACKET_STATUS_10 << 8), buffer, send_index, replace, 0);
+}
+
+// STATUS_11: setpoint INPUTS (pre-MTPA) and current-loop PI integrators.
+// id_set/iq_set are the commanded currents BEFORE MTPA/field-weakening/limits run,
+// i.e. the input to the setpoint block. Pair them with id_target/iq_target from
+// STATUS_8 (the outputs) to localize a divergence in fw_replay.py: if id_set/iq_set
+// match your command but the targets don't match your setpoint_block(), the bug is
+// in the MTPA math; if id_set/iq_set already differ, it is upstream.
+// vd_int/vq_int are the PI integrator states (accumulated part of vd/vq) -- a
+// windup indicator when vd/vq saturate against max_v_mag while braking.
+void comm_can_send_status11(uint8_t id, bool replace) {
+	int32_t send_index = 0;
+	uint8_t buffer[8];
+	buffer_append_float16(buffer, mcpwm_foc_get_id_set(), 1e2, &send_index); // id_set, A, x100
+	buffer_append_float16(buffer, mcpwm_foc_get_iq_set(), 1e2, &send_index); // iq_set, A, x100
+	buffer_append_float16(buffer, mcpwm_foc_get_vd_int(), 1e2, &send_index); // vd_int, V, x100
+	buffer_append_float16(buffer, mcpwm_foc_get_vq_int(), 1e2, &send_index); // vq_int, V, x100
+
+	comm_can_transmit_eid_replace(id | ((uint32_t)CAN_PACKET_STATUS_11 << 8), buffer, send_index, replace, 0);
+}
+
+// STATUS_12: sensorless observer lock health (the silent braking-loss failure mode).
+// In pure sensorless the applied phase equals the observer phase, so a phase delta
+// is useless. Instead this exposes whether the observer still has rotor lock:
+//   - flux_mag = NORM2(observer x1, x2): held near foc_motor_flux_linkage when
+//     locked; deviates when the observer loses track (e.g. voltage saturation).
+//   - lambda_est: adaptive flux estimate (drifts on *_LAMBDA_COMP observers when
+//     the model is wrong; constant otherwise).
+//   - phase_used: the absolute electrical angle fed to the (inverse) Park transform
+//     [deg]; visible slips/jumps in the trace indicate lost lock.
+//   - speed_fast: fast electrical speed estimate [rad/s]; bemf (STATUS_10) ==
+//     speed_fast * foc_motor_flux_linkage, and its sign drives the braking logic.
+void comm_can_send_status12(uint8_t id, bool replace) {
+	int32_t send_index = 0;
+	uint8_t buffer[8];
+	buffer_append_float16(buffer, mcpwm_foc_get_observer_flux(), 1e4, &send_index);   // flux_mag, Wb, x10000
+	buffer_append_float16(buffer, mcpwm_foc_get_observer_lambda(), 1e4, &send_index); // lambda_est, Wb, x10000
+	buffer_append_float16(buffer, mcpwm_foc_get_phase(), 1e1, &send_index);           // phase_used, deg, x10
+	buffer_append_float16(buffer, mcpwm_foc_get_speed_fast_radps(), 1e0, &send_index);// speed_fast, rad/s, x1
+
+	comm_can_transmit_eid_replace(id | ((uint32_t)CAN_PACKET_STATUS_12 << 8), buffer, send_index, replace, 0);
+}
+
 #if CAN_ENABLE
 static THD_FUNCTION(cancom_read_thread, arg) {
 	(void)arg;
@@ -1455,6 +1583,11 @@ static THD_FUNCTION(cancom_status_internal_thread, arg) {
 		comm_can_send_status5(utils_second_motor_id(), true);
 		comm_can_send_status6(utils_second_motor_id(), true);
 		comm_can_send_status7(utils_second_motor_id(), true);
+		comm_can_send_status8(utils_second_motor_id(), true);
+		comm_can_send_status9(utils_second_motor_id(), true);
+		comm_can_send_status10(utils_second_motor_id(), true);
+		comm_can_send_status11(utils_second_motor_id(), true);
+		comm_can_send_status12(utils_second_motor_id(), true);
 		chThdSleepMilliseconds(2);
 	}
 }
@@ -1526,13 +1659,23 @@ static THD_FUNCTION(cancom_status_thread, arg) {
 		if (conf->can_mode == CAN_MODE_VESC) {
 			send_can_status(conf->can_status_msgs_r1, conf->controller_id);
 
-			// Status 7 has no enable bit in the VESC Tool, so it is always
+			// Status 7-10 have no enable bit in the VESC Tool, so they are always
 			// sent here at the can_status_rate_1 cadence.
 			mc_interface_select_motor_thread(1);
 			comm_can_send_status7(conf->controller_id, false);
+			comm_can_send_status8(conf->controller_id, false);
+			comm_can_send_status9(conf->controller_id, false);
+			comm_can_send_status10(conf->controller_id, false);
+			comm_can_send_status11(conf->controller_id, false);
+			comm_can_send_status12(conf->controller_id, false);
 #ifdef HW_HAS_DUAL_MOTORS
 			mc_interface_select_motor_thread(2);
 			comm_can_send_status7(utils_second_motor_id(), false);
+			comm_can_send_status8(utils_second_motor_id(), false);
+			comm_can_send_status9(utils_second_motor_id(), false);
+			comm_can_send_status10(utils_second_motor_id(), false);
+			comm_can_send_status11(utils_second_motor_id(), false);
+			comm_can_send_status12(utils_second_motor_id(), false);
 #endif
 		}
 

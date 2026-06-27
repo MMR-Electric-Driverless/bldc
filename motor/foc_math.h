@@ -193,6 +193,14 @@ typedef struct {
 	float m_br_vq_before;
 	int m_br_no_duty_samples;
 
+	// Debug/telemetry snapshots captured in control_current() for CAN STATUS_10.
+	// m_debug_max_v_mag is the max voltage vector the inverter can apply (without
+	// overmodulation), m_debug_bemf is the back-EMF estimate ωe·ψm. When the
+	// applied |v| approaches m_debug_max_v_mag while m_debug_bemf is close to it,
+	// the current loop is saturating and control is being lost (relevant while braking).
+	float m_debug_max_v_mag;
+	float m_debug_bemf;
+
 	float m_duty_abs_filtered;
 	float m_duty_filtered;
 	bool m_was_control_duty;

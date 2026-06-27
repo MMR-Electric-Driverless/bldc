@@ -1423,6 +1423,77 @@ float mcpwm_foc_get_vq(void) {
 	return get_motor_now()->m_motor_state.vq;
 }
 
+// Debug getters for the MTPA / braking CAN telemetry (STATUS_8..10).
+
+// Final d/q current setpoints after MTPA, field weakening and current limiting
+// (m_motor_state.id_target/iq_target), i.e. what the current PI loop chases.
+float mcpwm_foc_get_id_target(void) {
+	return get_motor_now()->m_motor_state.id_target;
+}
+
+float mcpwm_foc_get_iq_target(void) {
+	return get_motor_now()->m_motor_state.iq_target;
+}
+
+// Field-weakening current magnitude computed by foc_run_fw().
+float mcpwm_foc_get_i_fw(void) {
+	return get_motor_now()->m_i_fw_set;
+}
+
+// Max applicable voltage vector magnitude (without overmodulation) and the
+// back-EMF estimate (ωe·ψm), both snapshotted in control_current().
+float mcpwm_foc_get_max_v_mag(void) {
+	return get_motor_now()->m_debug_max_v_mag;
+}
+
+float mcpwm_foc_get_bemf(void) {
+	return get_motor_now()->m_debug_bemf;
+}
+
+// True when the controller is shorting all phases (duty forced to 0) instead of
+// actively braking. Directly indicates the braking "give up active control" state.
+bool mcpwm_foc_get_control_duty(void) {
+	return get_motor_now()->m_was_control_duty;
+}
+
+// Counter for the braking short-all-phases protection (clamped to 100 when not braking).
+int mcpwm_foc_get_br_no_duty_samples(void) {
+	return get_motor_now()->m_br_no_duty_samples;
+}
+
+// Current PI controller integrator states (the accumulated part of vd/vq). When
+// vd/vq saturate against max_v_mag but these keep growing, the loop is winding up
+// and about to lose control (relevant while braking).
+float mcpwm_foc_get_vd_int(void) {
+	return get_motor_now()->m_motor_state.vd_int;
+}
+
+float mcpwm_foc_get_vq_int(void) {
+	return get_motor_now()->m_motor_state.vq_int;
+}
+
+// Sensorless observer flux-magnitude = NORM2(x1, x2), in Weber. The observer holds
+// this near the configured flux linkage (foc_motor_flux_linkage) when it has rotor
+// lock; it deviates when the observer loses track (e.g. voltage saturation while
+// braking). This is the main "is the observer still locked?" health signal.
+float mcpwm_foc_get_observer_flux(void) {
+	volatile observer_state *s = &get_motor_now()->m_observer_state;
+	return NORM2_f(s->x1, s->x2);
+}
+
+// Adaptive flux-linkage estimate (lambda_est). For the *_LAMBDA_COMP observer
+// types this tracks the real flux and drifts when the model is wrong; for the
+// other types it stays equal to the configured foc_motor_flux_linkage.
+float mcpwm_foc_get_observer_lambda(void) {
+	return get_motor_now()->m_observer_state.lambda_est;
+}
+
+// Fast rotor speed estimate in electrical rad/s (the one used for the back-EMF
+// feedforward and the braking sign logic). bemf (STATUS_10) == this * flux_linkage.
+float mcpwm_foc_get_speed_fast_radps(void) {
+	return get_motor_now()->m_speed_est_fast;
+}
+
 float mcpwm_foc_get_mod_alpha_raw(void) {
 	return get_motor_now()->m_motor_state.mod_alpha_raw;
 }
@@ -4593,6 +4664,10 @@ static void control_current(motor_all_state_t *motor, float dt) {
 	// Calculate the max length of the voltage space vector without overmodulation.
 	// Is simply 1/sqrt(3) * v_bus. See https://microchipdeveloper.com/mct5001:start. Adds margin with max_duty.
 	float max_v_mag = ONE_BY_SQRT3 * max_duty * state_m->v_bus * conf_now->foc_overmod_factor;
+
+	// Snapshot for CAN debug (STATUS_10): available voltage headroom vs back-EMF.
+	motor->m_debug_max_v_mag = max_v_mag;
+	motor->m_debug_bemf = dec_bemf;
 
 	// Saturation and anti-windup. Notice that the d-axis has priority as it controls field
 	// weakening and the efficiency.
