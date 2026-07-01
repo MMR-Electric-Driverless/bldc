@@ -401,8 +401,8 @@ typedef struct {
 	float l_max_vin;
 	float l_battery_cut_start;
 	float l_battery_cut_end;
-	float l_battery_regen_cut_start;
-	float l_battery_regen_cut_end;
+	float l_battery_regen_cut_start;	// test 62V
+	float l_battery_regen_cut_end;		// test 67V
 	bool l_slow_abs_current;
 	float l_temp_fet_start;
 	float l_temp_fet_end;

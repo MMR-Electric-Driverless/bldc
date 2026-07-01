@@ -31,7 +31,7 @@ void foc_observer_update(float v_alpha, float v_beta, float i_alpha, float i_bet
 	float L = conf_now->foc_motor_l;
 	float lambda = conf_now->foc_motor_flux_linkage;
 
-	// Saturation compensation
+	// Saturation compensation	maxim_150: <foc_sat_comp_mode>0</foc_sat_comp_mode> -> SAT_COMP_DISABLED
 	switch(conf_now->foc_sat_comp_mode) {
 	case SAT_COMP_LAMBDA:
 		// Here we assume that the inductance drops by the same amount as the flux linkage. I have
@@ -65,7 +65,7 @@ void foc_observer_update(float v_alpha, float v_beta, float i_alpha, float i_bet
 		break;
 	}
 
-	// Temperature compensation
+	// Temperature compensation	maxim_150: <foc_temp_comp>0</foc_temp_comp> -> false
 	if (conf_now->foc_temp_comp) {
 		R = motor->m_res_temp_comp;
 	}
@@ -85,7 +85,7 @@ void foc_observer_update(float v_alpha, float v_beta, float i_alpha, float i_bet
 	const float R_ib = R * i_beta;
 	const float gamma_half = motor->m_gamma_now * 0.5;
 
-	switch (conf_now->foc_observer_type) {
+	switch (conf_now->foc_observer_type) {	// maxim_150: <foc_observer_type>1</foc_observer_type> -> FOC_OBSERVER_ORTEGA_ORIGINAL
 	case FOC_OBSERVER_ORTEGA_ORIGINAL: {
 		float err = SQ(lambda) - (SQ(state->x1 - L_ia) + SQ(state->x2 - L_ib));
 
