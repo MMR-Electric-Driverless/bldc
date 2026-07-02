@@ -56,6 +56,7 @@ Everything defaults from `maxim_150.xml`; CLI flags override. Output CSV default
 | `--hold-time` | extra seconds held at `--rpm-end` after the ramp |
 | `--erpm-input` | interpret the ramp numbers as electrical erpm instead of mechanical rpm |
 | `--control-freq` | override the control loop frequency [Hz] (else derived from config) |
+| `--phase-shunts` | board has inline phase shunts (maxim does **not**); only then does V0_V7 give 30 kHz |
 | `--out` | output CSV path |
 | `--plot` | also write a PNG next to the CSV |
 
@@ -94,24 +95,32 @@ columns to see the lag.
 > `m_pll_speed`). In the sim `we` is the imposed ground truth; that's why the value handed
 > to `control_current` is named `we_est`, not `we`.
 
-## Control frequency (why 30 kHz, not 15 kHz)
+## Control frequency (the maxim runs at 15 kHz, not 30 kHz)
 
 `dt` is taken directly from config at the top of the FOC interrupt
 (`mcpwm_foc.c:2996-3005`):
 
 ```c
-if (conf_now->foc_control_sample_mode == FOC_CONTROL_SAMPLE_MODE_V0_V7) {
-    dt = 1.0 / conf_now->foc_f_zv;          // straight from config
-} else {
-    dt = 1.0 / (conf_now->foc_f_zv / 2.0);
-}
+#ifdef HW_HAS_PHASE_SHUNTS
+    if (foc_control_sample_mode == FOC_CONTROL_SAMPLE_MODE_V0_V7)
+        dt = 1.0 / foc_f_zv;            // 30 kHz  (sample twice per PWM period)
+    else
+        dt = 1.0 / (foc_f_zv / 2.0);    // 15 kHz
+#else                                   // no phase shunts
+    dt = 1.0 / (foc_f_zv / 2.0);        // 15 kHz  (sample once per period)
+#endif
 ```
 
-`maxim_150.xml` has `foc_f_zv=30000` and `foc_control_sample_mode=1` (V0_V7), so with phase
-shunts `dt = 1/30000` → **30 kHz**. 15 kHz is the `else` branch (`1/(f_zv/2)`), which applies
-only for a non-V0_V7 sample mode or a board without phase shunts. If your board really runs
-at 15 kHz, pass `--control-freq 15000`. This matters because both the FW ramp and the 0.01
-duty filter integrate per tick.
+The `foc_control_sample_mode` (V0_V7) **only matters when `HW_HAS_PHASE_SHUNTS` is
+defined**. The maxim (`hwconf/vesc/maxim/hw_maxim_core.h`) defines `HW_HAS_3_SHUNTS` and
+`HW_HAS_PHASE_FILTERS` but **not** `HW_HAS_PHASE_SHUNTS` (those are different: low-side leg
+shunts + phase-voltage RC filters vs. inline phase-current shunts). So it takes the `#else`
+branch: `dt = 1/(30000/2) = 1/15000` → **15 kHz** (66.7 µs), regardless of the sample mode.
+
+So simverter **defaults to 15 kHz** for the maxim. Pass `--phase-shunts` only for a board
+that actually has inline phase shunts (then V0_V7 gives 30 kHz), or `--control-freq <Hz>` to
+force any value. This matters because both the FW ramp and the 0.01 duty filter integrate
+per tick.
 
 ## Where vq is limited / saturated
 

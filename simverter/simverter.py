@@ -76,6 +76,7 @@ Everything defaults from simverter/maxim_150.xml; CLI flags override.
 import argparse
 import math
 import os
+import random
 import xml.etree.ElementTree as ET
 
 HERE = os.path.dirname(os.path.abspath(__file__))
@@ -241,17 +242,25 @@ class Conf:
         self.p_duty_norm = TWO_BY_SQRT3 / self.foc_overmod_factor
         self.pole_pairs = self.si_motor_poles / 2.0
 
-    def control_dt(self):
+    def control_dt(self, phase_shunts=False):
         """Control-loop timestep, derived exactly as mcpwm_foc.c:2996-3005.
 
-        With phase shunts (HW_HAS_PHASE_SHUNTS, true on this hardware):
-            V0_V7 sample mode -> dt = 1/foc_f_zv          (samples twice per PWM period)
-            otherwise         -> dt = 1/(foc_f_zv/2)
-        maxim_150.xml has foc_control_sample_mode=1 (V0_V7) and foc_f_zv=30000,
-        so the loop runs at 30 kHz (dt = 33.3 us).
+            #ifdef HW_HAS_PHASE_SHUNTS
+                V0_V7 sample mode -> dt = 1/foc_f_zv        (sample twice per PWM period)
+                otherwise         -> dt = 1/(foc_f_zv/2)
+            #else   (no phase shunts)
+                dt = 1/(foc_f_zv/2)                         (sample once per period)
 
+        The foc_control_sample_mode (V0_V7) ONLY matters when HW_HAS_PHASE_SHUNTS is
+        defined. The maxim (hwconf/vesc/maxim/hw_maxim_core.h) defines HW_HAS_3_SHUNTS
+        and HW_HAS_PHASE_FILTERS but NOT HW_HAS_PHASE_SHUNTS, so it takes the #else
+        branch: dt = 1/(30000/2) = 1/15000 -> 15 kHz (66.7 us), regardless of sample
+        mode. That is why the real board runs at 15 kHz, not 30 kHz.
+
+        phase_shunts defaults to False to match the maxim. Pass --phase-shunts only for
+        boards with inline phase shunts (there V0_V7 gives 30 kHz).
         """
-        if self.foc_control_sample_mode == FOC_CONTROL_SAMPLE_MODE_V0_V7:
+        if phase_shunts and self.foc_control_sample_mode == FOC_CONTROL_SAMPLE_MODE_V0_V7:
             return 1.0 / self.foc_f_zv
         return 1.0 / (self.foc_f_zv / 2.0)
 
@@ -573,6 +582,7 @@ CSV_COLUMNS = [
     "id",               # actual d current [A] (plant / "measured")
     "iq",               # actual q current [A]
     "i_abs",            # sqrt(id^2 + iq^2) [A]
+    "vbus",             # DC-link voltage actually used this tick [V] (with --vbus-noise)
     "vd",               # applied d voltage [V] (post-saturation)
     "vq",               # applied q voltage [V] (post-saturation)
     "vd_int",           # d integrator [V]
@@ -593,6 +603,9 @@ CSV_COLUMNS = [
 def simulate(conf, args):
     dt = args.control_dt
     st = State()
+
+    # optional speed-ripple noise on the rpm ramp (reproducible with --noise-seed).
+    rng = random.Random(args.noise_seed)
 
     # commanded q current (fixed). Signed: positive = motoring in +erpm direction.
     iq_cmd = args.iq
@@ -627,7 +640,23 @@ def simulate(conf, args):
         else:
             rpm = rpm_at(t, args.rpm_start, args.rpm_end, args.accel)
             erpm = rpm * conf.pole_pairs
+        # Optional speed ripple: additive Gaussian noise on the MECHANICAL rpm, std =
+        # args.rpm_noise. It propagates into the true `we` (plant) and, filtered, into
+        # `we_est` (decoupling); the plant/estimator mismatch it creates is what makes
+        # the loop -- and therefore the duty -- ripple, the way a real bench trace does.
+        if args.rpm_noise > 0.0:
+            rpm += rng.gauss(0.0, args.rpm_noise)
+            erpm = rpm * conf.pole_pairs
         we = erpm / 60.0 * 2.0 * math.pi          # true electric omega [rad/s], RPM2RADPS_f
+
+        # Optional DC-link ripple: additive Gaussian noise on v_bus (std = args.vbus_noise),
+        # drawn from the SAME rng as the rpm noise. It shrinks/grows max_v_mag tick to tick
+        # (max_v_mag = ONE_BY_SQRT3*max_duty*v_bus) so the voltage budget itself ripples --
+        # on the real bench the regen-pumped link is far from a clean rail. Floored above 0
+        # to keep max_v_mag / voltage_normalize well-defined.
+        v_bus_now = v_bus
+        if args.vbus_noise > 0.0:
+            v_bus_now = max(1e-3, v_bus + rng.gauss(0.0, args.vbus_noise))
         # NB: the firmware never has this true `we` -- it only ever has estimates
         # (m_speed_est_fast, m_pll_speed). Here `we` is the sim's ground truth, used
         # by the motor plant; the controller gets the estimate (st.speed_est_fast).
@@ -650,7 +679,7 @@ def simulate(conf, args):
         # 4. PI current loop + voltage saturation (mcpwm_foc.c:4547).
         #    The controller uses the ESTIMATED omega (m_speed_est_fast, one tick old,
         #    as in the firmware pipeline), NOT the true speed.
-        control_current(conf, st, st.speed_est_fast, v_bus, dt)
+        control_current(conf, st, st.speed_est_fast, v_bus_now, dt)
 
         # log AFTER control_current so vd/vq/mod are the values actually applied
         rows.append({
@@ -659,6 +688,7 @@ def simulate(conf, args):
             "iq_cmd": iq_cmd, "i_fw_set": st.i_fw_set,
             "mtpa_id": st.mtpa_id, "id_target": st.id_target, "iq_target": st.iq_target,
             "id": st.id, "iq": st.iq, "i_abs": NORM2(st.id, st.iq),
+            "vbus": v_bus_now,
             "vd": st.vd, "vq": st.vq, "vd_int": st.vd_int, "vq_int": st.vq_int,
             "bemf": st.bemf, "max_v_mag": st.max_v_mag, "max_vq": st.max_vq,
             "mod_d": st.mod_d, "mod_q": st.mod_q, "mod_q_filter": st.mod_q_filter,
@@ -744,6 +774,14 @@ def main():
                    help="end MECHANICAL rpm (physical)")
     p.add_argument("--accel", type=float, default=4000.0,
                    help="mechanical rpm per second (0 = fixed speed at rpm-start)")
+    p.add_argument("--rpm-noise", type=float, default=0.0,
+                   help="std dev of Gaussian speed ripple added to the MECHANICAL rpm "
+                        "each tick [rpm] (0 = clean ramp). Propagates to bemf -> duty.")
+    p.add_argument("--vbus-noise", type=float, default=0.0,
+                   help="std dev of Gaussian DC-link ripple added to v_bus each tick [V] "
+                        "(0 = clean rail). Ripples max_v_mag; shares --noise-seed rng.")
+    p.add_argument("--noise-seed", type=int, default=None,
+                   help="RNG seed for --rpm-noise / --vbus-noise (reproducible; default: random)")
     p.add_argument("--hold-time", type=float, default=0.1,
                    help="extra seconds held at rpm-end after the ramp")
     p.add_argument("--sim-time", type=float, default=None,
@@ -752,6 +790,9 @@ def main():
                    help="interpret rpm-start/end/accel as ELECTRICAL erpm instead of mechanical")
     p.add_argument("--control-freq", type=float, default=None,
                    help="override control loop frequency [Hz] (else derived from config)")
+    p.add_argument("--phase-shunts", action="store_true",
+                   help="board has HW_HAS_PHASE_SHUNTS (maxim does NOT). Only then does "
+                        "V0_V7 sample mode give 30 kHz; otherwise the loop is 15 kHz")
     p.add_argument("-o", "--out", default=None,
                    help="output CSV path (default: sim.csv, or <name>.csv if --name given)")
     p.add_argument("-n", "--name", default=None,
@@ -768,7 +809,7 @@ def main():
         args.out = base if os.path.dirname(base) else os.path.join(HERE, base)
 
     conf = Conf(args.config)
-    args.control_dt = (1.0 / args.control_freq) if args.control_freq else conf.control_dt()
+    args.control_dt = (1.0 / args.control_freq) if args.control_freq else conf.control_dt(args.phase_shunts)
 
     print(f"config           : {args.config}")
     print(f"control frequency: {1.0/args.control_dt:.0f} Hz  (dt = {args.control_dt*1e6:.2f} us)")
