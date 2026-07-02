@@ -250,10 +250,6 @@ class Conf:
         maxim_150.xml has foc_control_sample_mode=1 (V0_V7) and foc_f_zv=30000,
         so the loop runs at 30 kHz (dt = 33.3 us).
 
-        NOTE: you mentioned expecting 15 kHz. 15 kHz corresponds to dt = 1/(f_zv/2),
-        i.e. either a non-V0_V7 sample mode or hardware without phase shunts. If your
-        board actually runs at 15 kHz, override with --control-freq 15000. The number
-        matters because both the FW ramp and the duty LP filter integrate per tick.
         """
         if self.foc_control_sample_mode == FOC_CONTROL_SAMPLE_MODE_V0_V7:
             return 1.0 / self.foc_f_zv
