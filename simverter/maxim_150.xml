@@ -130,8 +130,8 @@
     <foc_phase_filter_disable_fault>1</foc_phase_filter_disable_fault>
     <foc_phase_filter_max_erpm>4000</foc_phase_filter_max_erpm>
     <foc_mtpa_mode>1</foc_mtpa_mode>
-    <foc_fw_current_max>70</foc_fw_current_max>
-    <foc_fw_duty_start>0.9</foc_fw_duty_start>
+    <foc_fw_current_max>120</foc_fw_current_max>
+    <foc_fw_duty_start>0.8</foc_fw_duty_start>
     <foc_fw_q_current_factor>0</foc_fw_q_current_factor>
     <foc_fw_ramp_time>0.2</foc_fw_ramp_time>
     <foc_speed_soure>1</foc_speed_soure>

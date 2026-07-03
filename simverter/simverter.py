@@ -378,13 +378,13 @@ def setpoint_block(conf, st, iq_cmd):
         # ================== for future tests ==================
         #max_iq = SQ(min(abs(conf.l_current_min), abs(conf.l_current_max))) - SQ(id_set_tmp)             # mcpwm_foc.c:3628
         #truncate(iq_set_tmp, -math.sqrt(max_iq), math.sqrt(max_iq))  # mcpwm_foc.c:3629
+        #i_diff = min(iq_set_tmp, i_diff)
         #iq_set_tmp = SIGN(iq_set_tmp) * iq_set_tmp    # mcpwm_foc.c:3630
         # ======================================================
 
-        i_diff = SQ(conf.l_current_max) - SQ(id_set_tmp)             # mcpwm_foc.c:3628
+        i_diff = SQ(iq_set_tmp) - SQ(id_set_tmp)             # mcpwm_foc.c:3628
         if i_diff < 0.0:
             i_diff = 0.0
-        i_diff = min(iq_set_tmp, i_diff)
         iq_set_tmp = SIGN(iq_set_tmp) * math.sqrt(i_diff)    # mcpwm_foc.c:3630
     else:
         # No MTPA: FW current goes straight onto the d-axis.  mcpwm_foc.c:3632-3633
