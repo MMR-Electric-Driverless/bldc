@@ -418,10 +418,18 @@ def setpoint_block(conf, st, iq_cmd):
 # deliberately NOT named `we`: in the firmware the decoupling equations use
 # m_speed_est_fast, an estimate, never the true speed (which the firmware never has).
 # ---------------------------------------------------------------------------
-def control_current(conf, st, we_est, v_bus, dt):
+def control_current(conf, st, we_est, v_bus, dt, id_noise=0.0, iq_noise=0.0):
     # state_m->max_duty is set to l_max_duty upstream (mcpwm_foc.c:3357), then
     # clamped to [0, l_max_duty] here (mcpwm_foc.c:4589-4590).
     max_duty = truncate(abs(conf.l_max_duty), 0.0, conf.l_max_duty)
+
+    # The PI (and the id/iq low-pass, the decoupling and MTPA that read it) act on
+    # the MEASURED current -- what the ADC captured this tick -- not the true plant
+    # current. id_noise/iq_noise (from --current-noise) is additive measurement
+    # ripple on that sample: the true dq currents (st.id/st.iq) are untouched, only
+    # what the controller *sees* is perturbed. Default 0.0 keeps the clean loop.
+    id_meas = st.id + id_noise
+    iq_meas = st.iq + iq_noise
 
     # --- d-axis gain scaling near full modulation ---  mcpwm_foc.c:4600-4613
     # Reduces the d-axis PI gain as modulation approaches the limit, to keep the
@@ -440,12 +448,12 @@ def control_current(conf, st, we_est, v_bus, dt):
 
     # --- low-pass the measured currents (used by decoupling, MTPA) ---
     # mcpwm_foc.c:4597-4598
-    st.id_filter = lp_fast(st.id_filter, st.id, conf.foc_current_filter_const)
-    st.iq_filter = lp_fast(st.iq_filter, st.iq, conf.foc_current_filter_const)
+    st.id_filter = lp_fast(st.id_filter, id_meas, conf.foc_current_filter_const)
+    st.iq_filter = lp_fast(st.iq_filter, iq_meas, conf.foc_current_filter_const)
 
     # --- PI controller ---  mcpwm_foc.c:4615-4628
-    Ierr_d = st.id_target - st.id
-    Ierr_q = st.iq_target - st.iq
+    Ierr_d = st.id_target - id_meas
+    Ierr_q = st.iq_target - iq_meas
     ki = conf.foc_current_ki
 
     st.vd_int += Ierr_d * (ki * d_gain_scale * dt)
@@ -657,6 +665,16 @@ def simulate(conf, args):
         v_bus_now = v_bus
         if args.vbus_noise > 0.0:
             v_bus_now = max(1e-3, v_bus + rng.gauss(0.0, args.vbus_noise))
+        # Optional current-measurement ripple: additive Gaussian noise (std =
+        # args.current_noise) on the id/iq the PI SAMPLES this tick, same rng as the
+        # other noise. Unlike --rpm/--vbus noise it perturbs the loop's *measurement*,
+        # not the plant: it de-saturates the odd tick (the q-error momentarily flips),
+        # so a voltage-limited duty stops pinning dead-flat at max and its filtered
+        # mean -- which drives field weakening -- rides below the peak, as on a bench.
+        # It is a LUMPED stand-in for ADC/shunt noise; the deterministic switching- and
+        # 6th-harmonic ripples are the larger real sources but are not modelled here.
+        id_noise = rng.gauss(0.0, args.current_noise) if args.current_noise > 0.0 else 0.0
+        iq_noise = rng.gauss(0.0, args.current_noise) if args.current_noise > 0.0 else 0.0
         # NB: the firmware never has this true `we` -- it only ever has estimates
         # (m_speed_est_fast, m_pll_speed). Here `we` is the sim's ground truth, used
         # by the motor plant; the controller gets the estimate (st.speed_est_fast).
@@ -679,7 +697,7 @@ def simulate(conf, args):
         # 4. PI current loop + voltage saturation (mcpwm_foc.c:4547).
         #    The controller uses the ESTIMATED omega (m_speed_est_fast, one tick old,
         #    as in the firmware pipeline), NOT the true speed.
-        control_current(conf, st, st.speed_est_fast, v_bus_now, dt)
+        control_current(conf, st, st.speed_est_fast, v_bus_now, dt, id_noise, iq_noise)
 
         # log AFTER control_current so vd/vq/mod are the values actually applied
         rows.append({
@@ -780,6 +798,10 @@ def main():
     p.add_argument("--vbus-noise", type=float, default=0.0,
                    help="std dev of Gaussian DC-link ripple added to v_bus each tick [V] "
                         "(0 = clean rail). Ripples max_v_mag; shares --noise-seed rng.")
+    p.add_argument("--current-noise", type=float, default=0.0,
+                   help="std dev of Gaussian ripple [A] on the id/iq the PI SAMPLES each tick "
+                        "(0 = ideal measurement). Lumped ADC/shunt-noise stand-in; de-saturates "
+                        "the loop so voltage-limited duty stops pinning flat. Shares --noise-seed rng.")
     p.add_argument("--noise-seed", type=int, default=None,
                    help="RNG seed for --rpm-noise / --vbus-noise (reproducible; default: random)")
     p.add_argument("--hold-time", type=float, default=0.1,

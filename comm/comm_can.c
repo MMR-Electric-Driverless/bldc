@@ -1289,7 +1289,7 @@ void comm_can_send_status7(uint8_t id, bool replace) {
 // STATUS_8: FOC current setpoints / MTPA debug.
 // These are the firmware-truth values that fw_replay.py reconstructs offline:
 // the final d/q current targets (post-MTPA, post-FW, post-current-limit) and the
-// field-weakening current magnitude. Plus the active control mode and a flags byte.
+// field-weakening current magnitude. Plus the active control mode.
 void comm_can_send_status8(uint8_t id, bool replace) {
 	int32_t send_index = 0;
 	uint8_t buffer[8];
@@ -1299,16 +1299,6 @@ void comm_can_send_status8(uint8_t id, bool replace) {
 	buffer_append_float16(buffer, mcpwm_foc_get_i_fw(), 1e2, &send_index);
 	// 1-byte control mode (mc_control_mode enum: CURRENT, CURRENT_BRAKE, OPENLOOP, ...)
 	buffer[send_index++] = (uint8_t)mc_interface_get_control_mode();
-	// flags: bit0 = phases shorted (control_duty, i.e. not actively driving)
-	uint8_t flags = 0;
-	if (mcpwm_foc_get_control_duty()) {
-		flags |= 1 << 0;
-	}
-	buffer[send_index++] = flags;
-	// When control_duty is true here, the controller deliberately commands 
-	// duty = 0, i.e. it turns the inverter into a passive short (all low-side 
-	// or freewheeling) instead of running the current PI loop. It does this to 
-	// avoid actively braking/reversing through the wrong sign during the transient.
 
 	comm_can_transmit_eid_replace(id | ((uint32_t)CAN_PACKET_STATUS_8 << 8), buffer, send_index, replace, 0);
 }
@@ -1328,14 +1318,16 @@ void comm_can_send_status8(uint8_t id, bool replace) {
 //       mod_d = vd * voltage_normalize
 //       mod_q = vq * voltage_normalize
 // A modulation magnitude of 1.0 corresponds to the maximum voltage the inverter
-// can synthesize (including overmodulation). v_bus is also needed to interpret
-// max_v_mag from STATUS_10. Measured id/iq are already on STATUS_7.
+// can synthesize (including overmodulation). v_bus is needed to reconstruct
+// max_v_mag (= ONE_BY_SQRT3 * max_duty * v_bus * overmod). Measured id/iq are on
+// STATUS_7. duty_filtered is the smoothed duty the braking logic uses -- distinct
+// from the instantaneous duty_cycle_now already on STATUS_1.
 void comm_can_send_status9(uint8_t id, bool replace) {
 	int32_t send_index = 0;
 	uint8_t buffer[8];
 	buffer_append_float16(buffer, mcpwm_foc_get_vd(), 1e2, &send_index);            // vd, V, x100
 	buffer_append_float16(buffer, mcpwm_foc_get_vq(), 1e2, &send_index);            // vq, V, x100
-	buffer_append_float16(buffer, mc_interface_get_duty_cycle_now(), 1e3, &send_index); // duty, -1..1, x1000
+	buffer_append_float16(buffer, mcpwm_foc_get_duty_filtered(), 1e3, &send_index); // duty_filtered, -1..1, x1000
 	// v_bus: used to normalize vd/vq into mod_d/mod_q (= v * 1.5 / v_bus)
 	buffer_append_float16(buffer, mc_interface_get_input_voltage_filtered(), 1e2, &send_index); // v_bus, V, x100
 
@@ -1343,10 +1335,11 @@ void comm_can_send_status9(uint8_t id, bool replace) {
 }
 
 // STATUS_10: braking / loss-of-control trace.
-// |v|applied is the magnitude of the applied voltage vector, max_v_mag is the
-// largest vector the inverter can synthesize, bemf is the back-EMF estimate
-// (omega_e * flux_linkage). When |v|applied saturates against max_v_mag while
-// bemf approaches it, the current loop can no longer drive current (control lost).
+// |v|applied is the magnitude of the applied voltage vector, bemf is the back-EMF
+// estimate (omega_e * flux_linkage). max_v_mag is not sent (reconstruct it from
+// v_bus on STATUS_9). The vd/vq saturated flags are the firmware's own per-axis
+// saturation booleans (same semantics as the simverter): when vq saturates while
+// bemf is large, the current loop can no longer drive current (control lost).
 void comm_can_send_status10(uint8_t id, bool replace) {
 	int32_t send_index = 0;
 	uint8_t buffer[8];
@@ -1354,20 +1347,19 @@ void comm_can_send_status10(uint8_t id, bool replace) {
 	float vq = mcpwm_foc_get_vq();
 	float v_mag = sqrtf(vd * vd + vq * vq);
 	buffer_append_float16(buffer, v_mag, 1e2, &send_index);                  // V, x100
-	buffer_append_float16(buffer, mcpwm_foc_get_max_v_mag(), 1e2, &send_index); // V, x100
 	buffer_append_float16(buffer, mcpwm_foc_get_bemf(), 1e2, &send_index);   // V, x100
-	// flags: bit0 = phases shorted (control_duty), bit1 = voltage saturated
+	// flags: bit0 = phases shorted (control_duty), bit1 = vd saturated, bit2 = vq saturated
 	uint8_t flags = 0;
 	if (mcpwm_foc_get_control_duty()) {
 		flags |= 1 << 0;
 	}
-	if (v_mag >= mcpwm_foc_get_max_v_mag() * 0.98) {
+	if (mcpwm_foc_get_vd_saturated()) {
 		flags |= 1 << 1;
 	}
+	if (mcpwm_foc_get_vq_saturated()) {
+		flags |= 1 << 2;
+	}
 	buffer[send_index++] = flags;
-	// braking short-all-phases sample counter (0..100)
-	int br = mcpwm_foc_get_br_no_duty_samples();
-	buffer[send_index++] = (uint8_t)(br > 255 ? 255 : br);
 
 	comm_can_transmit_eid_replace(id | ((uint32_t)CAN_PACKET_STATUS_10 << 8), buffer, send_index, replace, 0);
 }

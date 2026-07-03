@@ -1450,6 +1450,23 @@ float mcpwm_foc_get_bemf(void) {
 	return get_motor_now()->m_debug_bemf;
 }
 
+// True when vd/vq saturated against the voltage budget on the last control tick
+// (STATUS_10). Computed like the simverter: vd against max_v_mag, vq against the
+// remaining q-budget (plus the final 2D vector clamp).
+bool mcpwm_foc_get_vd_saturated(void) {
+	return get_motor_now()->m_debug_vd_saturated;
+}
+
+bool mcpwm_foc_get_vq_saturated(void) {
+	return get_motor_now()->m_debug_vq_saturated;
+}
+
+// Low-pass filtered duty cycle (signed). Unlike duty_cycle_now (already on
+// STATUS_1), this is the smoothed m_duty_filtered the braking logic uses.
+float mcpwm_foc_get_duty_filtered(void) {
+	return get_motor_now()->m_duty_filtered;
+}
+
 // True when the controller is shorting all phases (duty forced to 0) instead of
 // actively braking. Directly indicates the braking "give up active control" state.
 bool mcpwm_foc_get_control_duty(void) {
@@ -4671,21 +4688,30 @@ static void control_current(motor_all_state_t *motor, float dt) {
 
 	// Saturation and anti-windup. Notice that the d-axis has priority as it controls field
 	// weakening and the efficiency.
-	//float vd_presat = state_m->vd;
+	float vd_presat = state_m->vd;
 	utils_truncate_number_abs((float*)&state_m->vd, max_v_mag);
 	utils_truncate_number_abs((float*)&state_m->vd_int, max_v_mag);
 	//Previously, the below line removed a large amount of voltage from the integrator, proportional to the overshoot from any noise and the Kp term.
 	//It is possible (likely even!) that a better implementation exists, than simple truncation, to max_v_mag, perhaps related to applying the Ki term to the integral truncation.
 	//state_m->vd_int += (state_m->vd - vd_presat);
+	// Snapshot for CAN debug (STATUS_10): d-axis saturated against the full budget.
+	motor->m_debug_vd_saturated = fabsf(vd_presat) > max_v_mag;
 
 	float max_vq = sqrtf(SQ(max_v_mag) - SQ(state_m->vd));
-	//float vq_presat = state_m->vq;
+	float vq_presat = state_m->vq;
 	utils_truncate_number_abs((float*)&state_m->vq, max_vq);
 	utils_truncate_number_abs((float*)&state_m->vq_int, max_vq);
 
 	//state_m->vq_int += (state_m->vq - vq_presat);
+	// Snapshot for CAN debug (STATUS_10): q-axis saturated against the budget left
+	// after vd (this is the clamp that voltage-limits iq while braking).
+	motor->m_debug_vq_saturated = fabsf(vq_presat) > max_vq;
 
-	utils_saturate_vector_2d((float*)&state_m->vd, (float*)&state_m->vq, max_v_mag);
+	// Final 2D vector clamp onto the circle of radius max_v_mag also counts as
+	// a q saturation (matches the simverter).
+	if (utils_saturate_vector_2d((float*)&state_m->vd, (float*)&state_m->vq, max_v_mag)) {
+		motor->m_debug_vq_saturated = true;
+	}
 
 	// mod_d and mod_q are normalized such that 1 corresponds to the max possible voltage:
 	//    voltage_normalize = 1/(2/3*V_bus)

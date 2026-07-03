@@ -200,6 +200,11 @@ typedef struct {
 	// the current loop is saturating and control is being lost (relevant while braking).
 	float m_debug_max_v_mag;
 	float m_debug_bemf;
+	// vd/vq saturation snapshots (STATUS_10), computed like the simverter:
+	// vd_saturated when |vd_presat| > max_v_mag; vq_saturated when |vq_presat| >
+	// max_vq (the q-budget left after vd) or the final 2D vector clamp bites.
+	bool m_debug_vd_saturated;
+	bool m_debug_vq_saturated;
 
 	float m_duty_abs_filtered;
 	float m_duty_filtered;
