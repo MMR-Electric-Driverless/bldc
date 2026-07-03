@@ -285,6 +285,11 @@ class State:
         self.vq_int = 0.0
         self.vd = 0.0
         self.vq = 0.0
+        # true-frame voltage the plant actually integrates. Equals vd/vq unless an
+        # observer angle error is injected, in which case the controller's (vd,vq)
+        # are rotated out of the estimated frame into the true rotor frame.
+        self.vd_applied = 0.0
+        self.vq_applied = 0.0
         # modulation
         self.mod_d = 0.0
         self.mod_q = 0.0
@@ -369,9 +374,17 @@ def setpoint_block(conf, st, iq_cmd):
         st.mtpa_id = (lambda_ - math.sqrt(SQ(lambda_) + 8.0 * SQ(ld_lq_diff * iq_ref))) / (4.0 * ld_lq_diff)
         # ... then field weakening subtracts i_fw_set from the d target:
         id_set_tmp = st.mtpa_id - st.i_fw_set
-        i_diff = SQ(iq_set_tmp) - SQ(id_set_tmp)             # mcpwm_foc.c:3628
+
+        # ================== for future tests ==================
+        #max_iq = SQ(min(abs(conf.l_current_min), abs(conf.l_current_max))) - SQ(id_set_tmp)             # mcpwm_foc.c:3628
+        #truncate(iq_set_tmp, -math.sqrt(max_iq), math.sqrt(max_iq))  # mcpwm_foc.c:3629
+        #iq_set_tmp = SIGN(iq_set_tmp) * iq_set_tmp    # mcpwm_foc.c:3630
+        # ======================================================
+
+        i_diff = SQ(conf.l_current_max) - SQ(id_set_tmp)             # mcpwm_foc.c:3628
         if i_diff < 0.0:
             i_diff = 0.0
+        i_diff = min(iq_set_tmp, i_diff)
         iq_set_tmp = SIGN(iq_set_tmp) * math.sqrt(i_diff)    # mcpwm_foc.c:3630
     else:
         # No MTPA: FW current goes straight onto the d-axis.  mcpwm_foc.c:3632-3633
@@ -418,7 +431,8 @@ def setpoint_block(conf, st, iq_cmd):
 # deliberately NOT named `we`: in the firmware the decoupling equations use
 # m_speed_est_fast, an estimate, never the true speed (which the firmware never has).
 # ---------------------------------------------------------------------------
-def control_current(conf, st, we_est, v_bus, dt, id_noise=0.0, iq_noise=0.0):
+def control_current(conf, st, we_est, v_bus, dt, id_noise=0.0, iq_noise=0.0, mag_vd_max=0.98,
+                    aw_mode="truncate", angle_err=0.0):
     # state_m->max_duty is set to l_max_duty upstream (mcpwm_foc.c:3357), then
     # clamped to [0, l_max_duty] here (mcpwm_foc.c:4589-4590).
     max_duty = truncate(abs(conf.l_max_duty), 0.0, conf.l_max_duty)
@@ -428,8 +442,15 @@ def control_current(conf, st, we_est, v_bus, dt, id_noise=0.0, iq_noise=0.0):
     # current. id_noise/iq_noise (from --current-noise) is additive measurement
     # ripple on that sample: the true dq currents (st.id/st.iq) are untouched, only
     # what the controller *sees* is perturbed. Default 0.0 keeps the clean loop.
-    id_meas = st.id + id_noise
-    iq_meas = st.iq + iq_noise
+    # --- observer angle error injection (NON-firmware; models a mis-tracked rotor
+    # estimate) --- the controller sees currents projected onto its ESTIMATED dq
+    # frame, rotated by angle_err from the true rotor frame:
+    #   [id_c]   [ cos  sin][id_true]
+    #   [iq_c] = [-sin  cos][iq_true]
+    # With angle_err=0 this is the identity and the loop is byte-for-byte unchanged.
+    ce, se = math.cos(angle_err), math.sin(angle_err)
+    id_meas = (ce * st.id + se * st.iq) + id_noise
+    iq_meas = (-se * st.id + ce * st.iq) + iq_noise
 
     # --- d-axis gain scaling near full modulation ---  mcpwm_foc.c:4600-4613
     # Reduces the d-axis PI gain as modulation approaches the limit, to keep the
@@ -484,17 +505,30 @@ def control_current(conf, st, we_est, v_bus, dt, id_noise=0.0, iq_noise=0.0):
     # Largest voltage vector without overmodulation.  mcpwm_foc.c:4666
     max_v_mag = ONE_BY_SQRT3 * max_duty * v_bus * conf.foc_overmod_factor   # currently 1.0, so this is just ONE_BY_SQRT3 * max_duty * v_bus
 
-    # d-axis takes its share of the budget first (priority).  mcpwm_foc.c:4675-4676
+    # d-axis takes its share of the budget first (priority), but capped BELOW the
+    # full circle by mag_vd_max so a sliver is always reserved for the q-axis.
+    # Mirrors v7's foc_mag_vd_max.  mcpwm_foc.c:4675-4676
+    vd_limit = max_v_mag * mag_vd_max
     vd_presat = st.vd
-    st.vd = truncate_abs(st.vd, max_v_mag)
-    st.vd_int = truncate_abs(st.vd_int, max_v_mag)
-    st.vd_saturated = (abs(vd_presat) > max_v_mag)
+    st.vd = truncate_abs(st.vd, vd_limit)
+    # Anti-windup on the d integrator: "truncate" hard-clamps vd_int to the same
+    # rail (current firmware, mcpwm_foc.c:4710); "backcalc" instead subtracts the
+    # clamped overshoot -- incl. the Kp/decoupling term -- from vd_int, forcing
+    # vd_int + P' = vd_limit (the commented alternative, mcpwm_foc.c:4714).
+    if aw_mode == "backcalc":
+        st.vd_int += (st.vd - vd_presat)
+    else:
+        st.vd_int = truncate_abs(st.vd_int, vd_limit)
+    st.vd_saturated = (abs(vd_presat) > vd_limit)
 
     # q-axis is capped by whatever budget is LEFT.  mcpwm_foc.c:4681-4684
     max_vq = math.sqrt(max(0.0, SQ(max_v_mag) - SQ(st.vd)))
     vq_presat = st.vq
     st.vq = truncate_abs(st.vq, max_vq)
-    st.vq_int = truncate_abs(st.vq_int, max_vq)
+    if aw_mode == "backcalc":
+        st.vq_int += (st.vq - vq_presat)
+    else:
+        st.vq_int = truncate_abs(st.vq_int, max_vq)
     st.vq_saturated = (abs(vq_presat) > max_vq)
 
     # Final vector clamp onto the circle of radius max_v_mag.  mcpwm_foc.c:4688
@@ -516,7 +550,18 @@ def control_current(conf, st, we_est, v_bus, dt, id_noise=0.0, iq_noise=0.0):
 
     # duty_now = |mod| * p_duty_norm  (mcpwm_foc.c:3801). Signed in firmware; here we
     # only ever need its magnitude for the FW duty filter, so store the magnitude.
+    # duty is computed from the controller-frame (vd,vq), matching firmware telemetry.
     st.duty_now = NORM2(st.mod_d, st.mod_q) * conf.p_duty_norm
+
+    # The controller synthesised (vd,vq) in its ESTIMATED frame; the inverter applies
+    # them to the machine, so the plant sees them rotated back into the TRUE rotor
+    # frame by angle_err:
+    #   [vd_true]   [cos  -sin][vd_c]
+    #   [vq_true] = [sin   cos][vq_c]
+    # This is what projects the q-axis back-EMF onto the true d-axis (~bemf*sin(err))
+    # and loads vd_int, reproducing the bench discrepancy the ideal sim cannot show.
+    st.vd_applied = ce * st.vd - se * st.vq
+    st.vq_applied = se * st.vd + ce * st.vq
 
 
 # ---------------------------------------------------------------------------
@@ -530,14 +575,44 @@ def control_current(conf, st, we_est, v_bus, dt, id_noise=0.0, iq_noise=0.0):
 # decoupled loop would track; where vq saturates, iq can no longer be driven and
 # droops -- which is the behaviour we want to observe.
 # ---------------------------------------------------------------------------
-def plant_step(conf, st, we, dt):
+def sat_inductance(L0, i_mag, sat_frac, i_ref):
+    """TRUE (saturated) inductance of the iron as a function of stator current.
+
+    Linear droop that saturates: L = L0*(1 - sat_frac) once |i| >= i_ref, ramping
+    linearly from L0 at 0 A. sat_frac=0 (or i_ref<=0) disables it -> L stays L0.
+
+    This is the 'apparent/secant' inductance approximation: we drop L in the di/dt
+    equation but ignore the dL/di*(di/dt) incremental term. That is deliberate --
+    it is enough to create a REALISTIC feed-forward mismatch (the controller's
+    decoupling uses the constant config Lq/Ld) without pretending to be a full
+    saturating flux-map model.
+    """
+    if sat_frac <= 0.0 or i_ref <= 0.0:
+        return L0
+    droop = sat_frac * min(1.0, abs(i_mag) / i_ref)
+    return L0 * (1.0 - droop)
+
+
+def plant_step(conf, st, we, dt, args):
     R = conf.foc_motor_r
-    Ld = conf.p_ld
-    Lq = conf.p_lq
     psi = conf.foc_motor_flux_linkage
 
-    did = (st.vd - R * st.id + we * Lq * st.iq) / Ld
-    diq = (st.vq - R * st.iq - we * Ld * st.id - we * psi) / Lq
+    # TRUE plant inductances. When --plant-*-sat is set these deliberately DIFFER
+    # from the controller's configured conf.p_ld / conf.p_lq: the FOC decoupling
+    # feed-forward (control_current) uses the constant config values, so any droop
+    # here is a feed-forward MISMATCH that the PI integrators must absorb. That is
+    # what loads up vd_int/vq_int on a real bench (where Lq/Ld sag with current)
+    # while the ideal sim -- controller and plant sharing one parameter set -- keeps
+    # the integrators near the tiny Rs*i residual. Saturation is driven by the total
+    # stator current magnitude (the core saturates on total MMF, not per-axis).
+    i_mag = NORM2(st.id, st.iq)
+    Ld = sat_inductance(conf.p_ld, i_mag, args.plant_ld_sat, args.plant_sat_current)
+    Lq = sat_inductance(conf.p_lq, i_mag, args.plant_lq_sat, args.plant_sat_current)
+
+    # Use the TRUE-frame applied voltages (vd_applied/vq_applied). These equal
+    # st.vd/st.vq when no observer angle error is injected.
+    did = (st.vd_applied - R * st.id + we * Lq * st.iq) / Ld
+    diq = (st.vq_applied - R * st.iq - we * Ld * st.id - we * psi) / Lq
     st.id += did * dt
     st.iq += diq * dt
 
@@ -605,6 +680,8 @@ CSV_COLUMNS = [
     "duty_filtered",    # m_duty_abs_filtered (LP 0.01) -- drives FW
     "vd_saturated",     # 1 when vd hit +/-max_v_mag
     "vq_saturated",     # 1 when vq hit +/-max_vq (voltage-limited q current!)
+    "plant_ld",         # TRUE (saturated) plant Ld [H] -- differs from config p_ld when --plant-ld-sat set
+    "plant_lq",         # TRUE (saturated) plant Lq [H] -- differs from config p_lq when --plant-lq-sat set
 ]
 
 
@@ -697,7 +774,8 @@ def simulate(conf, args):
         # 4. PI current loop + voltage saturation (mcpwm_foc.c:4547).
         #    The controller uses the ESTIMATED omega (m_speed_est_fast, one tick old,
         #    as in the firmware pipeline), NOT the true speed.
-        control_current(conf, st, st.speed_est_fast, v_bus_now, dt, id_noise, iq_noise)
+        control_current(conf, st, st.speed_est_fast, v_bus_now, dt, id_noise, iq_noise,
+                        args.mag_vd_max, args.aw_mode, math.radians(args.angle_error))
 
         # log AFTER control_current so vd/vq/mod are the values actually applied
         rows.append({
@@ -713,11 +791,15 @@ def simulate(conf, args):
             "duty": st.duty_now, "duty_filtered": st.duty_abs_filtered,
             "vd_saturated": 1 if st.vd_saturated else 0,
             "vq_saturated": 1 if st.vq_saturated else 0,
+            # TRUE plant inductances the NEXT plant_step will use (st.id/st.iq are
+            # unchanged between here and plant_step), so they line up with this row.
+            "plant_ld": sat_inductance(conf.p_ld, NORM2(st.id, st.iq), args.plant_ld_sat, args.plant_sat_current),
+            "plant_lq": sat_inductance(conf.p_lq, NORM2(st.id, st.iq), args.plant_lq_sat, args.plant_sat_current),
         })
 
         # 5. motor plant: advance the true dq currents using the TRUE electrical
         #    omega (this is physics, not the controller's estimate).
-        plant_step(conf, st, we, dt)
+        plant_step(conf, st, we, dt, args)
 
         # 6. VESC speed estimator: update m_speed_est_fast from the electrical-phase
         #    advance, for the NEXT tick's decoupling (mcpwm_foc.c:3819-3822).
@@ -812,9 +894,32 @@ def main():
                    help="interpret rpm-start/end/accel as ELECTRICAL erpm instead of mechanical")
     p.add_argument("--control-freq", type=float, default=None,
                    help="override control loop frequency [Hz] (else derived from config)")
+    p.add_argument("--mag-vd-max", type=float, default=0.98,
+                   help="fraction of the voltage circle vd may consume (v7 foc_mag_vd_max); "
+                        "the rest is reserved for the q-axis so the current loop keeps q-axis "
+                        "authority under field weakening. 1.0 = old behaviour (vd can take all)")
+    p.add_argument("--aw-mode", choices=["truncate", "backcalc"], default="truncate",
+                   help="integrator anti-windup on saturation: 'truncate' hard-clamps "
+                        "vd_int/vq_int to the rail (current firmware); 'backcalc' subtracts the "
+                        "clamped overshoot (incl. Kp/decoupling) from the integrator instead")
+    p.add_argument("--angle-error", type=float, default=0.0,
+                   help="observer rotor-angle error [deg]: the controller's estimated dq frame "
+                        "is rotated by this from the true rotor frame. Projects bemf*sin(err) "
+                        "onto the d-axis and loads vd_int (0 = perfect observer, ideal sim)")
     p.add_argument("--phase-shunts", action="store_true",
                    help="board has HW_HAS_PHASE_SHUNTS (maxim does NOT). Only then does "
                         "V0_V7 sample mode give 30 kHz; otherwise the loop is 15 kHz")
+    p.add_argument("--plant-lq-sat", type=float, default=0.0,
+                   help="fractional drop of the TRUE plant Lq at --plant-sat-current "
+                        "(0.3 = plant Lq is 30%% below the configured value there, ramping "
+                        "linearly from 0 A). The controller keeps decoupling with the config "
+                        "Lq, so this is the feed-forward mismatch that loads vd_int/vq_int the "
+                        "way a real (saturating) motor does. 0 = ideal/matched (default)")
+    p.add_argument("--plant-ld-sat", type=float, default=0.0,
+                   help="fractional drop of the TRUE plant Ld at --plant-sat-current. 0 = ideal")
+    p.add_argument("--plant-sat-current", type=float, default=None,
+                   help="stator current magnitude |i|=sqrt(id^2+iq^2) [A] at which the above "
+                        "droops are fully reached (default: l_current_max from the config)")
     p.add_argument("-o", "--out", default=None,
                    help="output CSV path (default: sim.csv, or <name>.csv if --name given)")
     p.add_argument("-n", "--name", default=None,
@@ -832,6 +937,8 @@ def main():
 
     conf = Conf(args.config)
     args.control_dt = (1.0 / args.control_freq) if args.control_freq else conf.control_dt(args.phase_shunts)
+    if args.plant_sat_current is None:
+        args.plant_sat_current = conf.l_current_max
 
     print(f"config           : {args.config}")
     print(f"control frequency: {1.0/args.control_dt:.0f} Hz  (dt = {args.control_dt*1e6:.2f} us)")
@@ -842,6 +949,13 @@ def main():
           f"(pole pairs = {conf.pole_pairs:.0f})")
     print(f"voltage budget   : max_v_mag = 1/sqrt(3) * l_max_duty * vbus = "
           f"{ONE_BY_SQRT3 * conf.l_max_duty * args.vbus * conf.foc_overmod_factor:.2f} V")
+    if args.plant_lq_sat > 0.0 or args.plant_ld_sat > 0.0:
+        print(f"plant saturation : Lq -{args.plant_lq_sat*100:.0f}%  Ld -{args.plant_ld_sat*100:.0f}%  "
+              f"at |i|={args.plant_sat_current:.0f} A  (config Lq={conf.p_lq*1e6:.1f} uH -> "
+              f"{conf.p_lq*(1-args.plant_lq_sat)*1e6:.1f} uH, Ld={conf.p_ld*1e6:.1f} uH -> "
+              f"{conf.p_ld*(1-args.plant_ld_sat)*1e6:.1f} uH)  [feed-forward mismatch ENABLED]")
+    else:
+        print("plant saturation : off (plant Lq/Ld == config -> integrators stay near Rs*i)")
 
     # ==============================
     #          START SIM
