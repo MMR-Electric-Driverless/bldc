@@ -4686,17 +4686,36 @@ static void control_current(motor_all_state_t *motor, float dt) {
 	motor->m_debug_max_v_mag = max_v_mag;
 	motor->m_debug_bemf = dec_bemf;
 
-	// Saturation and anti-windup. Notice that the d-axis has priority as it controls field
-	// weakening and the efficiency.
+	// Saturation and anti-windup. The d-axis has priority as it controls field
+	// weakening and the efficiency, BUT it is capped below the full circle by
+	// mag_vd_max so a sliver of the voltage budget is always reserved for the
+	// q-axis. Without this, deep field weakening drives vd to the full max_v_mag,
+	// max_vq collapses to 0, and the current loop loses ALL q-axis authority ->
+	// open-loop iq runaway during high-speed braking. Mirrors v7's foc_mag_vd_max.
+	//
+	// Tunable from VESC Tool by repurposing the unused foc_hall_interp_erpm field
+	// (this build is sensorless, foc_sensor_mode=0, so hall interpolation never
+	// runs). Guard against that field's native default/range: only (0.5, 1.0] is
+	// treated as a valid mag_vd_max, otherwise fall back to 1.0.
+	// (Promote to a real conf_now->foc_mag_vd_max when the config field is backported.)
+	float mag_vd_max = conf_now->foc_hall_interp_erpm;
+	if (mag_vd_max <= 0.5f || mag_vd_max > 1.0f) {
+		mag_vd_max = 1.0f;
+	}
+	// "You always have to leave the space!"
+	float vd_limit = max_v_mag * mag_vd_max;
+
 	float vd_presat = state_m->vd;
-	utils_truncate_number_abs((float*)&state_m->vd, max_v_mag);
-	utils_truncate_number_abs((float*)&state_m->vd_int, max_v_mag);
+	utils_truncate_number_abs((float*)&state_m->vd, vd_limit);
+	utils_truncate_number_abs((float*)&state_m->vd_int, vd_limit);
+
 	//Previously, the below line removed a large amount of voltage from the integrator, proportional to the overshoot from any noise and the Kp term.
 	//It is possible (likely even!) that a better implementation exists, than simple truncation, to max_v_mag, perhaps related to applying the Ki term to the integral truncation.
 	//state_m->vd_int += (state_m->vd - vd_presat);
-	// Snapshot for CAN debug (STATUS_10): d-axis saturated against the full budget.
-	motor->m_debug_vd_saturated = fabsf(vd_presat) > max_v_mag;
+	// Snapshot for CAN debug (STATUS_10): d-axis saturated against its reserved budget.
+	motor->m_debug_vd_saturated = fabsf(vd_presat) > vd_limit;
 
+	// q-axis gets whatever budget is left; mag_vd_max guarantees this is >= 0.
 	float max_vq = sqrtf(SQ(max_v_mag) - SQ(state_m->vd));
 	float vq_presat = state_m->vq;
 	utils_truncate_number_abs((float*)&state_m->vq, max_vq);
