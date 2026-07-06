@@ -762,5 +762,6 @@ void foc_precalc_values(motor_all_state_t *motor) {
 	motor->p_inv_ld_lq = (1.0 / motor->p_lq - 1.0 / motor->p_ld);
 	motor->p_v2_v3_inv_avg_half = (0.5 / motor->p_lq + 0.5 / motor->p_ld) * 0.9; // With the 0.9 we undo the adjustment from the detection
 	motor->m_observer_state.lambda_est = conf_now->foc_motor_flux_linkage;
-	motor->p_duty_norm = TWO_BY_SQRT3 / conf_now->foc_overmod_factor;
+	motor->p_duty_norm = TWO_BY_SQRT3;
+	// motor->p_duty_norm = TWO_BY_SQRT3 / conf_now->foc_overmod_factor;
 }

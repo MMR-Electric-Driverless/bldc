@@ -1297,6 +1297,7 @@ void comm_can_send_status8(uint8_t id, bool replace) {
 	buffer_append_float16(buffer, mcpwm_foc_get_id_target(), 1e2, &send_index);
 	buffer_append_float16(buffer, mcpwm_foc_get_iq_target(), 1e2, &send_index);
 	buffer_append_float16(buffer, mcpwm_foc_get_i_fw(), 1e2, &send_index);
+	buffer_append_float16(buffer, mcpwm_foc_get_duty_abs_filtered(), 1e3, &send_index); // duty_abs_filtered, -1..1, x1000
 	// 1-byte control mode (mc_control_mode enum: CURRENT, CURRENT_BRAKE, OPENLOOP, ...)
 	buffer[send_index++] = (uint8_t)mc_interface_get_control_mode();
 
@@ -1329,7 +1330,7 @@ void comm_can_send_status9(uint8_t id, bool replace) {
 	buffer_append_float16(buffer, mcpwm_foc_get_vq(), 1e2, &send_index);            // vq, V, x100
 	buffer_append_float16(buffer, mcpwm_foc_get_duty_filtered(), 1e3, &send_index); // duty_filtered, -1..1, x1000
 	// v_bus: used to normalize vd/vq into mod_d/mod_q (= v * 1.5 / v_bus)
-	buffer_append_float16(buffer, mc_interface_get_input_voltage_filtered(), 1e2, &send_index); // v_bus, V, x100
+	buffer_append_float16(buffer, mc_interface_get_input_voltage_filtered(), 1e2, &send_index); // v_bus, V, x100	// REMOVE ALREADY IN STATUS5
 
 	comm_can_transmit_eid_replace(id | ((uint32_t)CAN_PACKET_STATUS_9 << 8), buffer, send_index, replace, 0);
 }
@@ -1343,10 +1344,6 @@ void comm_can_send_status9(uint8_t id, bool replace) {
 void comm_can_send_status10(uint8_t id, bool replace) {
 	int32_t send_index = 0;
 	uint8_t buffer[8];
-	float vd = mcpwm_foc_get_vd();
-	float vq = mcpwm_foc_get_vq();
-	float v_mag = sqrtf(vd * vd + vq * vq);
-	buffer_append_float16(buffer, v_mag, 1e2, &send_index);                  // V, x100
 	buffer_append_float16(buffer, mcpwm_foc_get_bemf(), 1e2, &send_index);   // V, x100
 	// flags: bit0 = phases shorted (control_duty), bit1 = vd saturated, bit2 = vq saturated
 	uint8_t flags = 0;

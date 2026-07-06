@@ -1440,12 +1440,6 @@ float mcpwm_foc_get_i_fw(void) {
 	return get_motor_now()->m_i_fw_set;
 }
 
-// Max applicable voltage vector magnitude (without overmodulation) and the
-// back-EMF estimate (ωe·ψm), both snapshotted in control_current().
-float mcpwm_foc_get_max_v_mag(void) {
-	return get_motor_now()->m_debug_max_v_mag;
-}
-
 float mcpwm_foc_get_bemf(void) {
 	return get_motor_now()->m_debug_bemf;
 }
@@ -1465,6 +1459,10 @@ bool mcpwm_foc_get_vq_saturated(void) {
 // STATUS_1), this is the smoothed m_duty_filtered the braking logic uses.
 float mcpwm_foc_get_duty_filtered(void) {
 	return get_motor_now()->m_duty_filtered;
+}
+
+float mcpwm_foc_get_duty_abs_filtered(void) {
+	return get_motor_now()->m_duty_abs_filtered;
 }
 
 // True when the controller is shorting all phases (duty forced to 0) instead of
@@ -3816,7 +3814,7 @@ void mcpwm_foc_adc_int_handler(void *p, uint32_t flags) {
 	// Calculate duty cycle
 	motor_now->m_motor_state.duty_now = SIGN(motor_now->m_motor_state.vq) *
 			NORM2_f(motor_now->m_motor_state.mod_d, motor_now->m_motor_state.mod_q) *
-			motor_now->p_duty_norm; // p_duty_norm = TWO_BY_SQRT3 / conf_now->foc_overmod_factor;
+			motor_now->p_duty_norm; // p_duty_norm = TWO_BY_SQRT3;
 
 	float phase_for_speed_est = 0.0;
 	switch (conf_now->foc_speed_soure) {
@@ -4682,8 +4680,7 @@ static void control_current(motor_all_state_t *motor, float dt) {
 	// Is simply 1/sqrt(3) * v_bus. See https://microchipdeveloper.com/mct5001:start. Adds margin with max_duty.
 	float max_v_mag = ONE_BY_SQRT3 * max_duty * state_m->v_bus * conf_now->foc_overmod_factor;
 
-	// Snapshot for CAN debug (STATUS_10): available voltage headroom vs back-EMF.
-	motor->m_debug_max_v_mag = max_v_mag;
+	// Snapshot for CAN debug (STATUS_10): current back-EMF.
 	motor->m_debug_bemf = dec_bemf;
 
 	// Saturation and anti-windup. The d-axis has priority as it controls field
