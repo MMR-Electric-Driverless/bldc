@@ -91,6 +91,7 @@ float mcpwm_foc_get_bemf(void);
 bool mcpwm_foc_get_vd_saturated(void);
 bool mcpwm_foc_get_vq_saturated(void);
 float mcpwm_foc_get_duty_filtered(void);
+float mcpwm_foc_get_duty_abs_filtered(void);
 bool mcpwm_foc_get_control_duty(void);
 int mcpwm_foc_get_br_no_duty_samples(void);
 float mcpwm_foc_get_vd_int(void);
