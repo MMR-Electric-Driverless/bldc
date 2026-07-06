@@ -1297,7 +1297,6 @@ void comm_can_send_status8(uint8_t id, bool replace) {
 	buffer_append_float16(buffer, mcpwm_foc_get_id_target(), 1e2, &send_index);
 	buffer_append_float16(buffer, mcpwm_foc_get_iq_target(), 1e2, &send_index);
 	buffer_append_float16(buffer, mcpwm_foc_get_i_fw(), 1e2, &send_index);
-	buffer_append_float16(buffer, mcpwm_foc_get_duty_abs_filtered(), 1e3, &send_index); // duty_abs_filtered, -1..1, x1000
 	// 1-byte control mode (mc_control_mode enum: CURRENT, CURRENT_BRAKE, OPENLOOP, ...)
 	buffer[send_index++] = (uint8_t)mc_interface_get_control_mode();
 
@@ -1357,6 +1356,8 @@ void comm_can_send_status10(uint8_t id, bool replace) {
 		flags |= 1 << 2;
 	}
 	buffer[send_index++] = flags;
+	buffer_append_float16(buffer, mcpwm_foc_get_duty_abs_filtered(), 1e3, &send_index); // duty_abs_filtered, -1..1, x1000
+
 
 	comm_can_transmit_eid_replace(id | ((uint32_t)CAN_PACKET_STATUS_10 << 8), buffer, send_index, replace, 0);
 }
